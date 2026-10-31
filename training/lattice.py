@@ -30,6 +30,11 @@ def classify(mesh, case: Case):
     for h in case.holes:
         rr = np.hypot(cen[:, 1] - h.y, cen[:, 2] - h.z)
         lattice &= ~(rr < h.r + case.boss_thickness)
+    # keep material solid around clamps and the load patch (distance to an axis-aligned box)
+    for box in list(case.fixed_boxes) + ([case.load_box] if case.load_box is not None else []):
+        b = np.asarray(box, float).reshape(3, 2)
+        d = np.linalg.norm(np.maximum(np.maximum(b[:, 0] - cen, cen - b[:, 1]), 0.0), axis=1)
+        lattice &= ~(d < case.boss_thickness)
     return lattice
 
 
@@ -55,4 +60,6 @@ def assign_materials(mesh, mat: Material, lat: LatticeModel | None, case: Case,
         nu[is_lat] = lat.nu
         sy[is_lat] = lat.c_sy * mat.yield_strength * r[is_lat] ** lat.n_sy
         rho[is_lat] = r[is_lat]
+        full = is_lat & (rho >= 0.999)            # fully dense elements are solid material,
+        E[full], nu[full], sy[full] = mat.E, mat.nu, mat.yield_strength   # not the lattice law
     return E, nu, sy, rho, is_lat

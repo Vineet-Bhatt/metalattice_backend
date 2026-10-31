@@ -7,7 +7,7 @@ from training.lattice import assign_materials, element_volumes
 from training.fea import solve_static
 from training.gmm_props import load_property_table
 from training.gmm_surrogate import fit_lattice_model
-from training.graded import graded_design
+from training.graded import graded_design, oc_design
 
 
 def evaluate(mesh, vol, mat, lat, case, rho_field=None):
@@ -45,6 +45,8 @@ def main():
                     help="grade lattice density per element from the FEA stress field")
     ap.add_argument("--sf-target", type=float, default=None,
                     help="safety-factor target for --graded (default: baseline 1st-percentile SF)")
+    ap.add_argument("--oc", type=float, default=None, metavar="MASS_FRAC",
+                    help="min-compliance grading at this mean lattice relative density (e.g. 0.25)")
     ap.add_argument("--rho-min", type=float, default=0.10)
     ap.add_argument("--rho-max", type=float, default=0.60)
     a = ap.parse_args()
@@ -95,6 +97,23 @@ def main():
               f"stiffness {100*(gl['stiffness_N_per_mm']/base['stiffness_N_per_mm']-1):+.1f}%, "
               f"SF p1 {gl['min_sf_p1pct']:.3g}")
         graded["metrics"] = gl
+
+    if a.oc:
+        t0 = time.time()
+        oc = oc_design(mesh, mat, lat, case, mass_frac=a.oc, rho_min=max(a.rho_min, 0.05), rho_max=a.rho_max)
+        uni = lat.rel_density
+        lat_u = type(lat)(**{**lat.__dict__, "rel_density": a.oc})
+        un = evaluate(mesh, vol, mat, lat_u, case)                 # uniform lattice, same mass
+        og = evaluate(mesh, vol, mat, lat, case, rho_field=oc["rho"])
+        print(f"[oc] {len(oc['history'])} iterations ({time.time()-t0:.1f}s), "
+              f"final change {oc['history'][-1]['max_change']:.3g}")
+        print(f"{'':<20}{'solid':>12}{'uniform':>12}{'OC-graded':>12}")
+        for lbl, key in (("mass (g)", "mass_g"), ("stiffness (N/mm)", "stiffness_N_per_mm"),
+                         ("SF 1st pct", "min_sf_p1pct"), ("SF min lattice", "min_sf_lattice")):
+            print(f"{lbl:<20}{base[key]:>12.4g}{(un[key] or 0):>12.4g}{(og[key] or 0):>12.4g}")
+        print(f"[oc] vs uniform at equal mass: stiffness {100*(og['stiffness_N_per_mm']/un['stiffness_N_per_mm']-1):+.1f}%; "
+              f"vs solid: mass -{100*(1-og['mass_g']/base['mass_g']):.1f}%, "
+              f"stiffness {100*(og['stiffness_N_per_mm']/base['stiffness_N_per_mm']-1):+.1f}%")
 
     rows = [("mass (g)", "mass_g"), ("lattice vol. fraction", "lattice_volume_fraction"),
             ("max displacement (mm)", "max_disp_mm"), ("stiffness (N/mm)", "stiffness_N_per_mm"),

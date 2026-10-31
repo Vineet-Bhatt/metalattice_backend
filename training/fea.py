@@ -7,9 +7,17 @@ from skfem.helpers import sym_grad, ddot, trace, eye
 from .config import Case
 
 
+def in_box(pts, box, tol=0.0):
+    """pts: (3, n). box: (xmin, xmax, ymin, ymax, zmin, zmax)."""
+    b = np.asarray(box, float).reshape(3, 2)
+    return np.all((pts >= b[:, :1] - tol) & (pts <= b[:, 1:] + tol), axis=0)
+
+
 def _fixed_nodes(mesh, case: Case, tol: float = 0.25):
     p = mesh.p
     sel = np.zeros(p.shape[1], dtype=bool)
+    for box in case.fixed_boxes:
+        sel |= in_box(p, box)
     for h in case.holes:
         rr = np.hypot(p[1] - h.y, p[2] - h.z)
         sel |= (rr <= h.r + tol) & (p[0] >= h.x_min) & (p[0] <= h.x_max)
@@ -33,9 +41,14 @@ def solve_static(mesh, E_e, nu_e, case: Case):
     K = asm(stiff, basis, lam=lam_q, mu=mu_q)
 
     # traction on the loaded face
-    lf = mesh.facets_satisfying(lambda x: np.isclose(x[0], case.load_x, atol=1e-3))
+    if case.load_box is not None:
+        lf = mesh.facets_satisfying(lambda x: in_box(x, case.load_box), boundaries_only=True)
+        where = f"load box {tuple(case.load_box)}"
+    else:
+        lf = mesh.facets_satisfying(lambda x: np.isclose(x[0], case.load_x, atol=1e-3))
+        where = f"plane x={case.load_x}"
     if lf.size == 0:
-        raise RuntimeError(f"No boundary facets found on plane x={case.load_x}")
+        raise RuntimeError(f"No boundary facets found in {where}")
     fb = FacetBasis(mesh, elem, facets=lf)
     area = fb.dx.sum()
     t = np.array(case.force) / area
@@ -66,7 +79,9 @@ def solve_static(mesh, E_e, nu_e, case: Case):
                         + (sig[2, 2] - sig[0, 0]) ** 2)
                  + 3 * (sig[0, 1] ** 2 + sig[1, 2] ** 2 + sig[0, 2] ** 2))
 
+    energy = 0.5 * (sig * eps).sum(axis=(0, 1)) * basis.dx.sum(axis=1)   # strain energy per element
+
     disp = u[basis.nodal_dofs].T                      # (nnodes,3)
-    return dict(u=u, disp=disp, vm=vm, compliance=float(f @ u),
+    return dict(u=u, disp=disp, vm=vm, energy=energy, compliance=float(f @ u),
                 max_disp=float(np.linalg.norm(disp, axis=1).max()),
                 n_fixed_nodes=int(fixed_nodes.size), load_area=float(area))

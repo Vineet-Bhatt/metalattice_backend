@@ -36,6 +36,12 @@ class Case:
         Hole(10, 15, 4, -1, 16), Hole(70, 15, 4, -1, 16),
         Hole(10, 65, 4, -1, 16), Hole(70, 65, 4, -1, 16),
     ])
+    # Generic boundary conditions for arbitrary parts. A box is (xmin, xmax, ymin, ymax, zmin, zmax) in mm.
+    # fixed_boxes: nodes inside any box are fully clamped. load_box: boundary facets whose centre lies
+    # in the box receive `force` (total, N), spread evenly over their area. If load_box is None the
+    # original demo behaviour (plane x == load_x) is used.
+    fixed_boxes: list = field(default_factory=list)
+    load_box: tuple | None = None
     load_x: float = 110.0
     force: tuple = (0.0, 0.0, -5000.0)  
     mesh_size: float = 3.0              

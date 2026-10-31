@@ -62,3 +62,68 @@ def graded_design(mesh, mat: Material, lat: LatticeModel, case: Case, sf_target:
             rho_field = np.where(is_lat, _smooth(cen, rho_field, is_lat, smooth_k), 1.0)
     return dict(rho=rho_solved, is_lat=is_lat, history=history, converged=converged,
                 mass_g=history[-1]["mass_g"], res=res)
+
+
+def _filter_matrix(cen_lat, radius):
+    """Row-normalised linear-hat neighbour filter among lattice elements (sparse)."""
+    import scipy.sparse as sp
+    tree = KDTree(cen_lat)
+    pairs = tree.query_pairs(radius, output_type="ndarray")
+    n = len(cen_lat)
+    d = np.linalg.norm(cen_lat[pairs[:, 0]] - cen_lat[pairs[:, 1]], axis=1)
+    w = 1.0 - d / radius
+    H = sp.coo_matrix((np.r_[w, w, np.ones(n)], (np.r_[pairs[:, 0], pairs[:, 1], np.arange(n)],
+                                                np.r_[pairs[:, 1], pairs[:, 0], np.arange(n)])),
+                      shape=(n, n)).tocsr()
+    return sp.diags(1.0 / np.asarray(H.sum(axis=1)).ravel()) @ H
+
+
+def oc_design(mesh, mat: Material, lat: LatticeModel, case: Case, mass_frac: float,
+              rho_min: float = 0.12, rho_max: float = 0.90, iters: int = 40, move: float = 0.1,
+              eta: float = 0.5, radius: float | None = None, tol: float = 2e-3):
+    """Minimum-compliance grading of the lattice region at a fixed lattice mass fraction.
+
+    Optimality-criteria update with the lattice law E = c_E*E_s*rho^n_E, so the element
+    sensitivity is n_E * U_e / rho_e. `mass_frac` is the mean relative density of the lattice
+    region (e.g. 0.25). Densities stay inside [rho_min, rho_max]; rho_min is the
+    manufacturability floor. Returns dict(rho, is_lat, history, res).
+    """
+    vol = element_volumes(mesh)
+    cen = mesh.p[:, mesh.t].mean(axis=1).T
+    _, _, _, _, is_lat = assign_materials(mesh, mat, lat, case)
+    idx = np.where(is_lat)[0]
+    if idx.size == 0:
+        raise RuntimeError("no lattice region: shell/boss thickness leaves no interior elements")
+    if not (rho_min <= mass_frac <= rho_max):
+        raise ValueError(f"mass_frac {mass_frac} must lie in [{rho_min}, {rho_max}]")
+    V = vol[idx]
+    target = mass_frac * V.sum()
+    H = _filter_matrix(cen[idx], radius or 2.0 * case.mesh_size)
+
+    rho = np.ones(mesh.t.shape[1])
+    rho[idx] = mass_frac
+    history = []
+    for it in range(iters):
+        E, nu, sy, _, _ = assign_materials(mesh, mat, lat, case, rho_field=rho)
+        res = solve_static(mesh, E, nu, case)
+        r = rho[idx]
+        B = lat.n_E * (H @ (res["energy"][idx] / V)) / np.maximum(r, 1e-9)
+        lo, hi = 1e-30, 1e30
+        for _ in range(200):                                  # bisection on the volume multiplier
+            lam = np.sqrt(lo * hi)
+            new = np.clip(r * (B / lam) ** eta, np.maximum(r - move, rho_min), np.minimum(r + move, rho_max))
+            if (new * V).sum() > target:
+                lo = lam
+            else:
+                hi = lam
+            if hi / lo < 1 + 1e-6:
+                break
+        change = float(np.abs(new - r).max())
+        history.append(dict(iter=it, compliance=res["compliance"], max_change=change,
+                            lattice_mass_frac=float((r * V).sum() / V.sum())))
+        rho[idx] = new
+        if change < tol:
+            break
+    E, nu, sy, _, _ = assign_materials(mesh, mat, lat, case, rho_field=rho)
+    res = solve_static(mesh, E, nu, case)
+    return dict(rho=rho, is_lat=is_lat, history=history, res=res, sy=sy)
